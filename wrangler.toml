@@ -1,0 +1,6 @@
+name = "verify-website"
+compatibility_date = "2026-10-31"
+
+[pages_build_output_dir]
+# Gib hier an, in welchem Ordner deine index.html liegt (z.B. "." wenn sie direkt im Hauptverzeichnis ist)
+output_dir = "."
