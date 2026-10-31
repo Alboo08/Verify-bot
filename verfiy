@@ -1,79 +1,276 @@
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Server Verifizierung</title>
-    <style>
-        body {
-            background-color: #313338;
-            color: #dbdee1;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-        .card {
-            background-color: #2b2d31;
-            padding: 40px;
-            border-radius: 8px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        h1 {
-            color: #ffffff;
-            font-size: 24px;
-            margin-bottom: 10px;
-        }
-        p {
-            color: #949ba4;
-            font-size: 14px;
-            margin-bottom: 30px;
-        }
-        .btn {
-            background-color: #5865F2;
-            color: white;
-            border: none;
-            padding: 12px 20px;
-            font-size: 16px;
-            font-weight: 600;
-            border-radius: 4px;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-block;
-            transition: background-color 0.2s;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        .btn:hover {
-            background-color: #4752C4;
-        }
-    </style>
-</head>
-<body>
+require('dotenv').config();
+const { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, REST, Routes } = require('discord.js');
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
 
-    <div class="card">
-        <h1>Server Verifizierung</h1>
-        <p>Klicke unten, um dich mit deinem Discord-Account zu verifizieren und Zugriff auf den Server zu erhalten.</p>
-        <a id="verify-btn" href="#" class="btn">Mit Discord verifizieren</a>
-    </div>
+const CONFIG = {
+  BOT_TOKEN: process.env.BOT_TOKEN,
+  CLIENT_ID: process.env.CLIENT_ID,
+  CLIENT_SECRET: process.env.CLIENT_SECRET,
+  REDIRECT_URI: process.env.REDIRECT_URI || 'http://localhost:3000/callback',
+  ALLOWED_USER_ID: process.env.ALLOWED_USER_ID,
+  PORT: process.env.PORT || 3000
+};
 
-    <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const guildId = urlParams.get('guild');
+// Datenbank-Setup
+const db = new sqlite3.Database('./database.sqlite');
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS server_settings (
+    guild_id TEXT PRIMARY KEY,
+    verified_role_id TEXT,
+    unverified_role_id TEXT
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    access_token TEXT,
+    refresh_token TEXT
+  )`);
+});
 
-        // Trage hier deine Discord Client ID ein
-        const CLIENT_ID = 'DEINE_CLIENT_ID'; 
-        const REDIRECT_URI = encodeURIComponent('http://localhost:3000/callback');
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+});
 
-        const authUrl = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=identify%20guilds.join${guildId ? `&state=${guildId}` : ''}`;
+// Helper: Not-Verified Rolle bei allen Kanälen sperren
+async function setupUnverifiedRolePermissions(guild, roleId) {
+  const channels = await guild.channels.fetch();
+  channels.forEach(async (channel) => {
+    if (channel) {
+      await channel.permissionOverwrites.edit(roleId, {
+        ViewChannel: false
+      }).catch(console.error);
+    }
+  });
+}
 
-        document.getElementById('verify-btn').href = authUrl;
-    </script>
+// Event: Bot tritt neuem Server bei
+client.on('guildCreate', async (guild) => {
+  try {
+    const verifiedRole = await guild.roles.create({ name: 'Verified', reason: 'Auto-Verification System' });
+    const unverifiedRole = await guild.roles.create({ name: 'Not Verified', reason: 'Auto-Verification System' });
 
-</body>
-</html>
+    db.run(
+      `INSERT OR REPLACE INTO server_settings (guild_id, verified_role_id, unverified_role_id) VALUES (?, ?, ?)`,
+      [guild.id, verifiedRole.id, unverifiedRole.id]
+    );
+
+    await setupUnverifiedRolePermissions(guild, unverifiedRole.id);
+  } catch (err) {
+    console.error('Fehler beim automatischen Erstellen der Rollen:', err);
+  }
+});
+
+// Slash Commands Registrierung
+const commands = [
+  new SlashCommandBuilder()
+    .setName('select-verified-role')
+    .setDescription('Ändere die Verified Rolle')
+    .addRoleOption(option => option.setName('role').setDescription('Die neue Verified Rolle').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('select-not-verified-role')
+    .setDescription('Ändere die Not-Verified Rolle und wende Berechtigungen an')
+    .addRoleOption(option => option.setName('role').setDescription('Die neue Not-Verified Rolle').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('pull-members')
+    .setDescription('Pullt verifizierte Mitglieder auf einen Server')
+    .addStringOption(option => option.setName('target_guild_id').setDescription('ID des Ziel-Servers').setRequired(true))
+    .addIntegerOption(option => option.setName('amount').setDescription('Anzahl der Mitglieder (leer lassen für alle)'))
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(CONFIG.BOT_TOKEN);
+
+client.once('ready', async () => {
+  console.log(`Bot ist online als ${client.user.tag}`);
+  await rest.put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
+});
+
+// Slash Commands Handler
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName, guild, options } = interaction;
+
+  // /select-verified-role
+  if (commandName === 'select-verified-role') {
+    const role = options.getRole('role');
+    db.run(`UPDATE server_settings SET verified_role_id = ? WHERE guild_id = ?`, [role.id, guild.id]);
+    return interaction.reply({ content: `Verified Rolle wurde auf <@&${role.id}> gesetzt.`, ephemeral: true });
+  }
+
+  // /select-not-verified-role
+  if (commandName === 'select-not-verified-role') {
+    await interaction.deferReply({ ephemeral: true });
+    const role = options.getRole('role');
+    
+    db.run(`UPDATE server_settings SET unverified_role_id = ? WHERE guild_id = ?`, [role.id, guild.id]);
+    await setupUnverifiedRolePermissions(guild, role.id);
+
+    return interaction.editReply({ content: `Not-Verified Rolle auf <@&${role.id}> gesetzt und Kanalberechtigungen angepasst.` });
+  }
+
+  // /pull-members
+  if (commandName === 'pull-members') {
+    if (interaction.user.id !== CONFIG.ALLOWED_USER_ID) {
+      return interaction.reply({ content: 'Du hast keine Berechtigung, diesen Befehl auszuführen.', ephemeral: true });
+    }
+
+    const targetGuildId = options.getString('target_guild_id');
+    const amount = options.getInteger('amount');
+
+    const targetGuild = await client.guilds.fetch(targetGuildId).catch(() => null);
+    if (!targetGuild) {
+      return interaction.reply({ content: 'Zielserver nicht gefunden oder Bot ist nicht auf dem Server.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    let query = 'SELECT * FROM users';
+    if (amount) query += ` LIMIT ${amount}`;
+
+    db.all(query, [], async (err, rows) => {
+      if (err || !rows.length) {
+        return interaction.editReply({ content: 'Keine verifizierten User in der Datenbank gefunden.' });
+      }
+
+      let pulledCount = 0;
+      for (const row of rows) {
+        try {
+          await targetGuild.members.add(row.user_id, { accessToken: row.access_token });
+          pulledCount++;
+        } catch (e) {
+          console.error(`Fehler beim Pullen von User ${row.user_id}:`, e.message);
+        }
+      }
+
+      return interaction.editReply({ content: `Erfolgreich ${pulledCount} von ${rows.length} Mitgliedern gepullt.` });
+    });
+  }
+});
+
+// Express Server & Integrierte Webseite
+const app = express();
+
+// Liefert die Website direkt über die Haupt-Route "/" aus
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="de">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Server Verifizierung</title>
+        <style>
+            body {
+                background-color: #313338;
+                color: #dbdee1;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .card {
+                background-color: #2b2d31;
+                padding: 40px;
+                border-radius: 8px;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+                text-align: center;
+                max-width: 400px;
+                width: 100%;
+            }
+            h1 { color: #ffffff; font-size: 24px; margin-bottom: 10px; }
+            p { color: #949ba4; font-size: 14px; margin-bottom: 30px; }
+            .btn {
+                background-color: #5865F2;
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                font-size: 16px;
+                font-weight: 600;
+                border-radius: 4px;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
+                transition: background-color 0.2s;
+                width: 100%;
+                box-sizing: border-box;
+            }
+            .btn:hover { background-color: #4752C4; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Server Verifizierung</h1>
+            <p>Klicke unten, um dich mit deinem Discord-Account zu verifizieren und Zugriff auf den Server zu erhalten.</p>
+            <a id="verify-btn" href="#" class="btn">Mit Discord verifizieren</a>
+        </div>
+        <script>
+            const urlParams = new URLSearchParams(window.location.search);
+            const guildId = urlParams.get('guild');
+            const CLIENT_ID = '${CONFIG.CLIENT_ID}'; 
+            const REDIRECT_URI = encodeURIComponent('${CONFIG.REDIRECT_URI}');
+            const authUrl = \`https://discord.com/api/oauth2/authorize?client_id=\${CLIENT_ID}&redirect_uri=\${REDIRECT_URI}&response_type=code&scope=identify%20guilds.join\${guildId ? \`&state=\${guildId}\` : ''}\`;
+            document.getElementById('verify-btn').href = authUrl;
+        </script>
+    </body>
+    </html>
+  `);
+});
+
+// Callback-Route für die Discord OAuth2-Weiterleitung
+app.get('/callback', async (req, res) => {
+  const code = req.query.code;
+  const guildId = req.query.state;
+
+  if (!code) return res.send('Kein Code angegeben.');
+
+  try {
+    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      body: new URLSearchParams({
+        client_id: CONFIG.CLIENT_ID,
+        client_secret: CONFIG.CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: CONFIG.REDIRECT_URI
+      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }).then(r => r.json());
+
+    const userResponse = await fetch('https://discord.com/api/users/@me', {
+      headers: { authorization: `${tokenResponse.token_type} ${tokenResponse.access_token}` }
+    }).then(r => r.json());
+
+    db.run(`INSERT OR REPLACE INTO users (user_id, access_token, refresh_token) VALUES (?, ?, ?)`,
+      [userResponse.id, tokenResponse.access_token, tokenResponse.refresh_token]
+    );
+
+    if (guildId) {
+      db.get(`SELECT * FROM server_settings WHERE guild_id = ?`, [guildId], async (err, settings) => {
+        if (settings) {
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (guild) {
+            const member = await guild.members.fetch(userResponse.id).catch(() => null);
+            if (member) {
+              if (settings.unverified_role_id) await member.roles.remove(settings.unverified_role_id).catch(() => {});
+              if (settings.verified_role_id) await member.roles.add(settings.verified_role_id).catch(() => {});
+            }
+          }
+        }
+      });
+    }
+
+    res.send('Du wurdest erfolgreich verifiziert! Du kannst dieses Fenster jetzt schließen.');
+  } catch (error) {
+    console.error(error);
+    res.status(500).send('Fehler bei der Verifizierung.');
+  }
+});
+
+app.listen(CONFIG.PORT, () => console.log(`Webserver & Webseite laufen auf Port ${CONFIG.PORT}`));
+client.login(CONFIG.BOT_TOKEN);
