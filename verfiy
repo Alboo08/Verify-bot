@@ -63,15 +63,13 @@
     </div>
 
     <script>
-        // Holt sich die Server-ID (guild_id) aus der URL (z. B. ?guild=123456789)
         const urlParams = new URLSearchParams(window.location.search);
         const guildId = urlParams.get('guild');
 
-        // Deine Discord Client ID hier einfügen oder dynamisch laden
+        // Trage hier deine Discord Client ID ein
         const CLIENT_ID = 'DEINE_CLIENT_ID'; 
-        const REDIRECT_URI = encodeURIComponent('http://localhost:3000/callback'); // Muss mit deiner .env übereinstimmen
+        const REDIRECT_URI = encodeURIComponent('http://localhost:3000/callback');
 
-        // OAuth2 Link zusammenbauen (inklusive guild_id im 'state'-Parameter)
         const authUrl = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=identify%20guilds.join${guildId ? `&state=${guildId}` : ''}`;
 
         document.getElementById('verify-btn').href = authUrl;
