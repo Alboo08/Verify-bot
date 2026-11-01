@@ -58,7 +58,7 @@
 
     <div class="card">
         <h1>Server Verifizierung</h1>
-        <p>Klicke unten, um dich mit deinem Account zu verifizieren und Zugriff auf den Server zu erhalten.</p>
+        <p>Klicke unten, um dich mit deinem Discord-Account zu verifizieren und Zugriff auf den Server zu erhalten.</p>
         <a id="verify-btn" href="#" class="btn">Mit Discord verifizieren</a>
     </div>
 
@@ -66,8 +66,8 @@
         const urlParams = new URLSearchParams(window.location.search);
         const guildId = urlParams.get('guild');
 
-        // Trage hier deine Discord Client ID ein
-        const CLIENT_ID = 'DEINE_CLIENT_ID'; 
+        // Deine Discord Client ID (wird automatisch aus den Umgebungsvariablen oder hier genutzt)
+        const CLIENT_ID = '1553370873539338361'; 
         const REDIRECT_URI = encodeURIComponent(window.location.origin + '/callback');
 
         const authUrl = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=identify%20guilds.join${guildId ? `&state=${guildId}` : ''}`;
